@@ -1,111 +1,101 @@
-#include <pcl/console/parse.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/io/obj_io.h>
-#include <pcl/io/ply_io.h>
-#include <pcl/point_cloud.h>
-#include <pcl/point_representation.h>
-#include <pcl/point_types.h>
+#include <string>
 
+#include <pcl/common/transforms.h>
+#include <pcl/console/parse.h>
 #include <pcl/conversions.h>
 #include <pcl/features/fpfh.h>
 #include <pcl/features/normal_3d.h>
+#include <pcl/features/shot.h>
 #include <pcl/filters/uniform_sampling.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/io/obj_io.h>
 #include <pcl/io/pcd_io.h>
+#include <pcl/io/ply_io.h>
+#include <pcl/keypoints/sift_keypoint.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_representation.h>
+#include <pcl/point_types.h>
 #include <pcl/registration/correspondence_estimation.h>
 #include <pcl/registration/correspondence_rejection_distance.h>
+#include <pcl/registration/ia_ransac.h>
 #include <pcl/registration/transformation_estimation_svd.h>
-#include <pcl/visualization/cloud_viewer.h>
+#include <pcl/visualization/pcl_visualizer.h>
 
 using PointType = pcl::PointXYZ;
 using PointCloudXYZ = pcl::PointCloud<PointType>;
 using NormalCloud = pcl::PointCloud<pcl::Normal>;
 PointCloudXYZ::Ptr src, tgt;
 
-void drawPointCloud(std::vector<PointCloudXYZ::Ptr> cloud_ptrs)
+void drawPointCloud(PointCloudXYZ::Ptr pc1, PointCloudXYZ::Ptr pc2, std::string stageName)
 {
-    pcl::visualization::CloudViewer viewer("PCL Viewer");
+    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("Stage: " + stageName));
+    viewer->setBackgroundColor(0, 0, 0);
 
-    for (size_t i = 0; i < cloud_ptrs.size(); i++) {
-	std::cout << "Cloud size:" << cloud_ptrs[i]->size() << std::endl;
-
-	viewer.showCloud(cloud_ptrs[i], std::to_string(i));
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr pc1_rgb(new pcl::PointCloud<pcl::PointXYZRGB>);
+    pc1_rgb->points.resize(pc1->size());
+    for (size_t i = 0; i < pc1->points.size(); i++) {
+	pc1_rgb->points[i].x = pc1->points[i].x;
+	pc1_rgb->points[i].y = pc1->points[i].y;
+	pc1_rgb->points[i].z = pc1->points[i].z;
+	pc1_rgb->points[i].r = 255;
+	pc1_rgb->points[i].g = 0;
+	pc1_rgb->points[i].b = 0;
     }
-    while (!viewer.wasStopped()) {
+    pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGB> rgb1(pc1_rgb);
+    viewer->addPointCloud<pcl::PointXYZRGB>(pc1_rgb, rgb1, "First cloud");
+    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, "First cloud");
+
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr pc2_rgb(new pcl::PointCloud<pcl::PointXYZRGB>);
+    pc2_rgb->points.resize(pc2->size());
+    for (size_t i = 0; i < pc2->points.size(); i++) {
+	pc2_rgb->points[i].x = pc2->points[i].x;
+	pc2_rgb->points[i].y = pc2->points[i].y;
+	pc2_rgb->points[i].z = pc2->points[i].z;
+	pc2_rgb->points[i].r = 0;
+	pc2_rgb->points[i].g = 255;
+	pc2_rgb->points[i].b = 0;
+    }
+    pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGB> rgb2(pc2_rgb);
+    viewer->addPointCloud<pcl::PointXYZRGB>(pc2_rgb, rgb2, "Second cloud");
+    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "Second cloud");
+
+    viewer->addCoordinateSystem(1.0);
+    viewer->initCameraParameters();
+    while (!viewer->wasStopped()) {
+	viewer->spinOnce(100);
+	boost::this_thread::sleep(boost::posix_time::microseconds(100000));
     }
 }
-////////////////////////////////////////////////////////////////////////////////
-void estimateKeypoints(const PointCloudXYZ::Ptr& src,
-    const PointCloudXYZ::Ptr& tgt,
-    PointCloudXYZ& keypoints_src,
-    PointCloudXYZ& keypoints_tgt)
-{
-    // Get an uniform grid of keypoints
-    pcl::UniformSampling<PointType> uniform;
-    uniform.setRadiusSearch(10); // 1m
-
-    uniform.setInputCloud(src);
-    uniform.filter(keypoints_src);
-
-    uniform.setInputCloud(tgt);
-    uniform.filter(keypoints_tgt);
-
-    // For debugging purposes only: uncomment the lines below and use pcl_viewer to view the results, i.e.:
-    // pcl_viewer source_pcd keypoints_src.pcd -ps 1 -ps 10
-    //pcl::io::savePCDFileBinary("keypoints_src.pcd", keypoints_src);
-    //pcl::io::savePCDFileBinary("keypoints_tgt.pcd", keypoints_tgt);
-}
 
 ////////////////////////////////////////////////////////////////////////////////
-void estimateNormals(const PointCloudXYZ::Ptr& src,
-    const PointCloudXYZ::Ptr& tgt,
-    NormalCloud& normals_src,
-    NormalCloud& normals_tgt)
-{
-    pcl::NormalEstimation<PointType, pcl::Normal> normal_est;
-    normal_est.setInputCloud(src);
-    normal_est.setRadiusSearch(0.1); // 50cm
-    normal_est.compute(normals_src);
-
-    normal_est.setInputCloud(tgt);
-    normal_est.compute(normals_tgt);
-
-    // For debugging purposes only: uncomment the lines below and use pcl_viewer to view the results, i.e.:
-    // pcl_viewer normals_src.pcd
-    pcl::PointCloud<pcl::PointNormal> s, t;
-    pcl::copyPointCloud<PointType, pcl::PointNormal>(*src, s);
-    pcl::copyPointCloud<pcl::Normal, pcl::PointNormal>(normals_src, s);
-    pcl::copyPointCloud<PointType, pcl::PointNormal>(*tgt, t);
-    pcl::copyPointCloud<pcl::Normal, pcl::PointNormal>(normals_tgt, t);
-    //savePCDFileBinary("normals_src.pcd", s);
-    //savePCDFileBinary("normals_tgt.pcd", t);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-void estimateFPFH(const PointCloudXYZ::Ptr& src,
+void estimateSHOT352(const PointCloudXYZ::Ptr& src,
     const PointCloudXYZ::Ptr& tgt,
     const NormalCloud::Ptr& normals_src,
     const NormalCloud::Ptr& normals_tgt,
     const PointCloudXYZ::Ptr& keypoints_src,
     const PointCloudXYZ::Ptr& keypoints_tgt,
-    pcl::PointCloud<pcl::FPFHSignature33>& fpfhs_src,
-    pcl::PointCloud<pcl::FPFHSignature33>& fpfhs_tgt)
+    //pcl::PointCloud<pcl::FPFHSignature33>& fpfhs_src,
+    //pcl::PointCloud<pcl::FPFHSignature33>& fpfhs_tgt)
+    pcl::PointCloud<pcl::SHOT352>& shot352_src,
+    pcl::PointCloud<pcl::SHOT352>& shot352_tgt)
 {
     std::cout << "Computing fpfh for src" << std::endl;
-    pcl::FPFHEstimation<PointType, pcl::Normal, pcl::FPFHSignature33> fpfh_est;
-    fpfh_est.setInputCloud(keypoints_src);
-    fpfh_est.setInputNormals(normals_src);
-    fpfh_est.setRadiusSearch(10); // 1m
-    fpfh_est.setSearchSurface(src);
-    fpfh_est.compute(fpfhs_src);
+    //pcl::FPFHEstimation<PointType, pcl::Normal, pcl::FPFHSignature33> fpfh_est;
+    pcl::SHOTEstimation<PointType, pcl::Normal, pcl::SHOT352> est;
+    est.setInputCloud(keypoints_src);
+    est.setInputNormals(normals_src);
+    est.setRadiusSearch(1); // 1m
+    est.setSearchSurface(src);
+    est.compute(shot352_src);
 
     std::cout << "Computing fpfh for tgt" << std::endl;
-    fpfh_est.setInputCloud(keypoints_tgt);
-    fpfh_est.setInputNormals(normals_tgt);
-    fpfh_est.setSearchSurface(tgt);
-    fpfh_est.compute(fpfhs_tgt);
+    est.setInputCloud(keypoints_tgt);
+    est.setInputNormals(normals_tgt);
+    est.setSearchSurface(tgt);
+    est.compute(shot352_tgt);
 
-    std::cout << "fpfs_src:" << fpfhs_src.size() << " "
-	      << "fpfhs_tgt:" << fpfhs_tgt.size() << std::endl;
+    std::cout << "shot352_src:" << shot352_src.size() << " "
+	      << "shot352_tgt:" << shot352_tgt.size() << std::endl;
     //savePCDFile("fpfhs_tgt.pcd", out);
     // For debugging purposes only: uncomment the lines below and use pcl_viewer to view the results, i.e.:
     //pcl_viewer fpfhs_src.pcd;
@@ -122,12 +112,12 @@ void estimateFPFH(const PointCloudXYZ::Ptr& src,
     //savePCDFile("fpfhs_tgt.pcd", out);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-void findCorrespondences(const pcl::PointCloud<pcl::FPFHSignature33>::Ptr& fpfhs_src,
-    const pcl::PointCloud<pcl::FPFHSignature33>::Ptr& fpfhs_tgt,
+template <typename FeatureType>
+void findCorrespondences(const typename pcl::PointCloud<FeatureType>::Ptr& fpfhs_src,
+    const typename pcl::PointCloud<FeatureType>::Ptr& fpfhs_tgt,
     pcl::Correspondences& all_correspondences)
 {
-    pcl::registration::CorrespondenceEstimation<pcl::FPFHSignature33, pcl::FPFHSignature33> est;
+    pcl::registration::CorrespondenceEstimation<FeatureType, FeatureType> est;
     est.setInputSource(fpfhs_src);
     est.setInputTarget(fpfhs_tgt);
     est.determineReciprocalCorrespondences(all_correspondences);
@@ -148,51 +138,52 @@ void rejectBadCorrespondences(const pcl::CorrespondencesPtr& all_correspondences
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-void computeTransformation(const PointCloudXYZ::Ptr& src,
-    const PointCloudXYZ::Ptr& tgt,
+void computeTransformation(const PointCloudXYZ::Ptr src,
+    const PointCloudXYZ::Ptr tgt,
     Eigen::Matrix4f& transform)
 {
     // Get an uniform grid of keypoints
     PointCloudXYZ::Ptr keypoints_src(new PointCloudXYZ),
 	keypoints_tgt(new PointCloudXYZ);
 
-    estimateKeypoints(src, tgt, *keypoints_src, *keypoints_tgt);
-    pcl::console::print_info("Found %lu and %lu keypoints for the source and target datasets.\n", keypoints_src->points.size(), keypoints_tgt->points.size());
+    //pcl::console::print_info("Found %lu and %lu keypoints for the source and target datasets.\n", keypoints_src->points.size(), keypoints_tgt->points.size());
 
     // Compute normals for all points keypoint
     std::cout << "Estimating normals.." << std::endl;
     NormalCloud::Ptr normals_src(new NormalCloud),
 	normals_tgt(new NormalCloud);
-    estimateNormals(src, tgt, *normals_src, *normals_tgt);
+    //estimateNormals(src, tgt, *normals_src, *normals_tgt);
     pcl::console::print_info("Estimated %lu and %lu normals for the source and target datasets.\n", normals_src->points.size(), normals_tgt->points.size());
 
     std::cout << "Computing features.." << std::endl;
     // Compute FPFH features at each keypoint
     pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhs_src(new pcl::PointCloud<pcl::FPFHSignature33>),
 	fpfhs_tgt(new pcl::PointCloud<pcl::FPFHSignature33>);
-    //estimateFPFH(src, tgt, normals_src, normals_tgt, keypoints_src, keypoints_tgt, *fpfhs_src, *fpfhs_tgt);
+    //    pcl::PointCloud<pcl::SHOT352>::Ptr fpfhs_src(new pcl::PointCloud<pcl::SHOT352>),
+    //	fpfhs_tgt(new pcl::PointCloud<pcl::SHOT352>);
     std::cout << "Computing fpfh for src" << std::endl;
-    pcl::FPFHEstimation<PointType, pcl::Normal, pcl::FPFHSignature33> fpfh_est;
-    fpfh_est.setInputCloud(src);
-    fpfh_est.setInputNormals(normals_src);
-    fpfh_est.setRadiusSearch(1); // 1m
-    fpfh_est.setSearchSurface(src);
-    fpfh_est.compute(*fpfhs_src);
+    pcl::FPFHEstimation<PointType, pcl::Normal, pcl::FPFHSignature33> est;
+    //pcl::SHOTEstimation<PointType, pcl::Normal, pcl::SHOT352> est;
+    //est.setInputCloud(keypoints_src);
+    est.setInputNormals(normals_src);
+    est.setRadiusSearch(0.5); // 1m
+    est.setSearchSurface(src);
+    est.compute(*fpfhs_src);
 
     std::cout << "Computing fpfh for tgt" << std::endl;
-    fpfh_est.setInputCloud(tgt);
-    fpfh_est.setInputNormals(normals_tgt);
-    fpfh_est.setSearchSurface(tgt);
-    fpfh_est.compute(*fpfhs_tgt);
+    //est.setInputCloud(keypoints_tgt);
+    est.setInputNormals(normals_tgt);
+    est.setSearchSurface(tgt);
+    est.compute(*fpfhs_tgt);
 
-    std::cout << "fpfs_src:" << fpfhs_src->size() << " "
+    std::cout << "fpfhs_src:" << fpfhs_src->size() << " "
 	      << "fpfhs_tgt:" << fpfhs_tgt->size() << std::endl;
 
     std::cout << "finding correspondences.." << std::endl;
     // Find correspondences between keypoints in FPFH space
     pcl::CorrespondencesPtr all_correspondences(new pcl::Correspondences),
 	good_correspondences(new pcl::Correspondences);
-    findCorrespondences(fpfhs_src, fpfhs_tgt, *all_correspondences);
+    findCorrespondences<pcl::FPFHSignature33>(fpfhs_src, fpfhs_tgt, *all_correspondences);
     std::cout << "all_corres:" << all_correspondences->size() << std::endl;
 
     // Reject correspondences based on their XYZ distance
@@ -207,8 +198,8 @@ void computeTransformation(const PointCloudXYZ::Ptr& src,
     trans_est.estimateRigidTransformation(*keypoints_src, *keypoints_tgt, *good_correspondences, transform);
     std::cout << transform << std::endl;
 
-    pcl::transformPointCloud(*src, *src, transform);
-    drawPointCloud(std::vector<PointCloudXYZ::Ptr>{ src, tgt });
+    pcl::transformPointCloud(*src, *tgt, transform);
+    drawPointCloud(src, tgt, "Final Result");
 }
 
 #include <pcl/common/centroid.h>
@@ -241,50 +232,144 @@ void normalize(PointCloudXYZ::Ptr point_cloud)
     //std::cout << "Min after" << min_point.x << " " << min_point.y << " " << min_point.z << std::endl;
     //std::cout << "Max after" << max_point.x << " " << max_point.y << " " << max_point.z << std::endl;
 }
-/* ---[ */
-int main(int argc, char** argv)
+
+void downsamplePointCloud(PointCloudXYZ::Ptr ptr_cloud)
 {
-    //Load Mesh
-    std::cout << "Loading OBJ.." << std::endl;
-    pcl::PLYReader obj_reader;
-    std::string obj_path("../assets/mesh.ply");
-    PointCloudXYZ::Ptr mesh_cloud(new PointCloudXYZ);
-    obj_reader.read(obj_path, *mesh_cloud);
-    //Load Point Cloud
-    pcl::PCLPointCloud2::Ptr cloud2(new pcl::PCLPointCloud2());
-    pcl::PLYReader reader;
-    std::string ply_path("../assets/chair-pcl-bin.ply");
-    reader.read(ply_path, *cloud2);
-    PointCloudXYZ::Ptr cloud(new PointCloudXYZ);
-    pcl::fromPCLPointCloud2(*cloud2, *cloud);
-    std::cout << "Size of point cloud:" << cloud->size() << std::endl;
-    //Normalize
-    normalize(mesh_cloud);
-    normalize(cloud);
-    pcl::toPCLPointCloud2(*cloud, *cloud2);
     // Create the filtering object
     pcl::VoxelGrid<pcl::PCLPointCloud2> sor;
-    sor.setInputCloud(cloud2);
     float leaf_size = 0.01;
     sor.setLeafSize(leaf_size, leaf_size, leaf_size);
-    //pcl::PCLPointCloud2::Ptr cloud_filtered(new pcl::PCLPointCloud2());
-    sor.filter(*cloud2);
-    //sor.filter(*mesh_cloud);
-    pcl::fromPCLPointCloud2(*cloud2, *cloud);
-    std::cerr << "PointCloud after filtering: " << cloud->width * cloud->height
-	      << " data points (" << pcl::getFieldsList(*cloud) << ").";
 
-    //drawPointCloud(std::vector<PointCloudXYZ::Ptr>{ cloud, mesh_cloud });
+    pcl::PCLPointCloud2::Ptr ptr_cloud2(new pcl::PCLPointCloud2());
+    pcl::toPCLPointCloud2(*ptr_cloud, *ptr_cloud2);
 
-    // Compute the best transformtion
-    Eigen::Matrix4f transform;
-    computeTransformation(cloud, mesh_cloud, transform);
-    std::cout << "Computed Transformation.." << std::endl;
+    sor.setInputCloud(ptr_cloud2);
+    sor.filter(*ptr_cloud2);
 
-    // Transform the data and write it to disk
-    //PointCloudXYZ output;
-    //transformPointCloud(src, output, transform);
-    //savePCDFileBinary("source_transformed.pcd", output);
+    pcl::fromPCLPointCloud2(*ptr_cloud2, *ptr_cloud);
+
+    std::cout << "Point cloud size after filtering:" << ptr_cloud->size() << std::endl;
+}
+
+#include <pcl/registration/icp.h>
+Eigen::Matrix4f getTransform_icp(PointCloudXYZ::Ptr source_cloud, PointCloudXYZ::Ptr target_cloud)
+{
+    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+    icp.setInputSource(source_cloud);
+    icp.setInputTarget(target_cloud);
+
+    PointCloudXYZ Final;
+    icp.align(Final);
+    std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
+    std::cout << "ICP transformation:" << icp.getFinalTransformation() << std::endl;
+    return icp.getFinalTransformation();
+}
+
+boost::shared_ptr<PointCloudXYZ> estimateKeypoints(PointCloudXYZ::ConstPtr cloud)
+{
+
+    pcl::UniformSampling<PointType> uniform_sampling;
+    uniform_sampling.setInputCloud(cloud);
+    //TODO automatically adjust the search radius. This could be done by binary searching for the radius until the two point clouds have (close to) equal sizes
+    uniform_sampling.setRadiusSearch(0.01);
+    boost::shared_ptr<PointCloudXYZ> keypoints_cloud(new PointCloudXYZ);
+    uniform_sampling.filter(*keypoints_cloud);
+    std::cout << "Found " << keypoints_cloud->size() << " keypoints" << std::endl;
+
+    return keypoints_cloud;
+}
+
+NormalCloud::Ptr estimateNormals(PointCloudXYZ::ConstPtr cloud)
+{
+    pcl::NormalEstimation<PointType, pcl::Normal> normal_est;
+    normal_est.setInputCloud(cloud);
+    //normal_est.setRadiusSearch(0.06); // 50cm
+    normal_est.setSearchMethod(pcl::search::KdTree<PointType>::Ptr(new pcl::search::KdTree<PointType>));
+    normal_est.setKSearch(20);
+    NormalCloud::Ptr normals(new NormalCloud);
+    normal_est.compute(*normals);
+
+    //check if the normals are finite
+    for (int i = 0; i < normals->points.size(); i++) {
+	if (!pcl::isFinite<pcl::Normal>(normals->points[i])) {
+	    PCL_WARN("normals[%d] is not finite\n", i);
+	}
+    }
+    return normals;
+}
+
+using FeaturePointCloud = pcl::PointCloud<pcl::FPFHSignature33>;
+FeaturePointCloud::Ptr estimateFPFH(PointCloudXYZ::ConstPtr cloud, NormalCloud::ConstPtr normals)
+{
+    std::cout << "Computing fpfh.." << std::endl;
+    pcl::FPFHEstimation<PointType, pcl::Normal, pcl::FPFHSignature33> fpfh_est;
+    fpfh_est.setInputCloud(cloud);
+    fpfh_est.setInputNormals(normals);
+    fpfh_est.setSearchMethod(pcl::search::KdTree<PointType>::Ptr(new pcl::search::KdTree<PointType>));
+    fpfh_est.setKSearch(40);
+    fpfh_est.setSearchSurface(cloud);
+    //fpfh_est.setRadiusSearch(0.1);
+
+    FeaturePointCloud::Ptr features(new FeaturePointCloud);
+    fpfh_est.compute(*features);
+
+    std::cout << "features:" << features->size() << std::endl;
+
+    return features;
+}
+
+Eigen::Matrix4f getTransform_features(PointCloudXYZ::Ptr source, PointCloudXYZ::Ptr target)
+{
+    PointCloudXYZ::Ptr keypoints_source = estimateKeypoints(source);
+    PointCloudXYZ::Ptr keypoints_target = estimateKeypoints(target);
+    drawPointCloud(keypoints_source, keypoints_target, "Keypoints extracted");
+
+    NormalCloud::Ptr normals_source = estimateNormals(keypoints_source);
+    NormalCloud::Ptr normals_target = estimateNormals(keypoints_target);
+
+    auto features_source = estimateFPFH(keypoints_source, normals_source);
+    auto features_target = estimateFPFH(keypoints_target, normals_target);
+
+    return Eigen::Matrix4f::Identity();
+}
+
+int main(int argc, char** argv)
+{
+    std::string stageName("File loading");
+    //Load Mesh
+    std::cout << "Loading OBJ.." << std::endl;
+    std::string mesh_path("../assets/mesh_highRes.ply");
+    PointCloudXYZ::Ptr source_cloud(new PointCloudXYZ);
+    pcl::io::loadPLYFile(mesh_path, *source_cloud);
+    std::cout << "Size of mesh:" << source_cloud->size() << std::endl;
+    //Load Point Cloud
+    std::cout << "Loading cloud.." << std::endl;
+    std::string cloud_path("../assets/chair-pcl-bin.ply");
+    PointCloudXYZ::Ptr target_cloud(new PointCloudXYZ);
+    pcl::io::loadPLYFile(cloud_path, *target_cloud);
+    std::cout << "Size of point cloud:" << target_cloud->size() << std::endl;
+
+    //normalize(source_cloud);
+    //normalize(target_cloud);
+
+    drawPointCloud(source_cloud, target_cloud, stageName);
+
+    PointCloudXYZ::Ptr transformed_point_cloud(new PointCloudXYZ);
+    //Solution using ICP
+    //Eigen::Matrix4f transform_1 = Eigen::Matrix4f::Identity();
+
+    //float theta = M_PI / 14; // The angle of rotation in radians
+    //transform_1(0, 0) = cos(theta);
+    //transform_1(0, 1) = -sin(theta);
+    //transform_1(1, 0) = sin(theta);
+    //transform_1(1, 1) = cos(theta);
+    //pcl::transformPointCloud(*source_cloud, *source_cloud, transform_1);
+    //drawPointCloud(source_cloud, target_cloud, "Result of rotation");
+    //pcl::transformPointCloud(*source_cloud, *transformed_point_cloud, getTransform_icp(source_cloud, target_cloud));
+    //drawPointCloud(transformed_point_cloud, target_cloud, "ICP Result");
+
+    //Solution using features
+    auto transform = getTransform_features(source_cloud, target_cloud);
+    pcl::transformPointCloud(*source_cloud, *transformed_point_cloud, transform);
     return 0;
 }
-/* ]--- */
